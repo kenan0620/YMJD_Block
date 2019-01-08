@@ -16,6 +16,7 @@ typedef NSDictionary* (^defParamAndResponse)(NSDictionary *dic);
 
 @interface ViewController ()
 
+//block作属性时类型要选择为copy
 @property (nonatomic, readwrite, copy) defNoParamAndNoResponse block1;
 @property (nonatomic, readwrite, copy) defNoParamAndResponse block2;
 
@@ -30,11 +31,11 @@ typedef NSDictionary* (^defParamAndResponse)(NSDictionary *dic);
 - (void)viewDidLoad {
     [super viewDidLoad];
     // Do any additional setup after loading the view, typically from a nib.
-//    [self defineAndUseBlock];
+    [self defineAndUseBlock];
     
     [self BlockBottomLayerPrinciple];
     
-//    [self BlockCache];
+    [self BlockCache];
 }
 
 /**
@@ -44,6 +45,9 @@ typedef NSDictionary* (^defParamAndResponse)(NSDictionary *dic);
     /**
      对于存储我们都不陌生，内存优化，分析，资源存储等。在这里我们分析一下block是怎么存储的。oc程序里存储一般分为五部分：栈区、堆区、全局区、文字常量区、程序代码区。block有三种类型，全局_NSConcreteGlobalBlock、栈_NSConcreteStackBlock、堆_NSConcreteMallocBlock。
      其中，全局块存在全局内存中，相当于单例；栈块存在于栈内存中，作用域仅限于栈内；堆块存在于堆内存中，是一个带引用计数的对象，需要自行管理内存
+    
+     注意：在 ARC 开启的情况下，将只会有 NSConcreteGlobalBlock 和 NSConcreteMallocBlock 类型的 block。
+     
      
      使用过程中如何判断block的位置？
      1、block不访问外界变量
@@ -112,6 +116,12 @@ typedef NSDictionary* (^defParamAndResponse)(NSDictionary *dic);
          NSMallocBlock 堆区block
          堆区是内存的常驻区域，也叫永久存储区，block一般在函数中定义，最多是个栈block。
          作为一个对象，把它复制到堆中，想要使用它肯定要有一个指针指向它，而指向它的指针是作为property或静态变量出现的（如果不被引用也就没有了常驻于堆区的意义），而实际开发中多使用poperty引用。在堆上不会被复写，但是会增加引用计数
+         
+         堆中的block无法直接创建，其需要由_NSConcreteStackBlock类型的block拷贝而来(也就是说block需要执行copy之后才能存放到堆中)。由于block的拷贝最终都会调用_Block_copy_internal函数。
+         
+         在 ARC 中，捕获外部了变量的 block 的类会是 NSMallocBlock 或者 NSStackBlock，如果 block 被赋值给了某个变量，在这个过程中会执行 _Block_copy 将原有的 NSStackBlock 变成 NSMallocBlock；但是如果 block 没有被赋值给某个变量，那它的类型就是 NSStackBlock；没有捕获外部变量的 block 的类会是 NSGlobalBlock 即不在堆上，也不在栈上，它类似 C 语言函数一样会在代码段中。
+         
+         在非 ARC 中，捕获了外部变量的 block 的类会是 NSStackBlock，放置在栈上，没有捕获外部变量的 block 时与 ARC 环境下情况相同。
          */
         
         NSLog(@"\n--------------------block的存储域 堆块---------------------\n");
@@ -169,6 +179,27 @@ typedef NSDictionary* (^defParamAndResponse)(NSDictionary *dic);
          */
     }
    
+    /**
+     GCD中的blockh引用在block销毁的时候释放内部对象
+     
+     */
+    
+    /**
+     Block的递归调用
+     Block内部调用自身，递归调用是很多算法基础，特别是在无法提前预知循环终止条件的情况下。注意：由于Block内部引用了自身，这里必须使用__block避免循环引用问题。
+     
+     __block return_type (^blockName)(var_type) = [^return_type (var_type varName)
+     { if (returnCondition)
+     {
+     blockName = nil; return;
+     } // ... // 【递归调用】 blockName(varName);
+     } copy];
+     
+     //【初次调用】
+     blockName(varValue);
+     */
+    
+   
 }
 
 /**
@@ -177,6 +208,15 @@ typedef NSDictionary* (^defParamAndResponse)(NSDictionary *dic);
  */
 - (void)BlockBottomLayerPrinciple{
     {
+        
+        
+        /**
+         如何截获自动变量
+         Block的结构，和作为匿名函数的调用机制，那自动变量截获是发生在什么时候呢？
+         观察上节代码中__main_block_impl_0结构体（main栈上Block的结构体）的构造函数可以看到，栈上的变量count以参数的形式传入到了这个构造函数中，此处即为变量的自动截获。
+         因此可以这样理解：__block_impl结构体已经可以代表Block类了，但在栈上又声明了__main_block_impl_0结构体，对__block_impl进行封装后才来表示栈上的Block类，就是为了获取Block中使用到的栈上声明的变量（栈上没在Block中使用的变量不会被捕获），变量被保存在Block的结构体实例中。
+         所以在blk()执行之前，栈上简单数据类型的count无论发生什么变化，都不会影响到Block以参数形式传入而捕获的值。但这个变量是指向对象的指针时，是可以修改这个对象的属性的，只是不能为变量重新赋值。
+         */
         /**
          1、block外的变量引用
          
@@ -340,6 +380,52 @@ typedef NSDictionary* (^defParamAndResponse)(NSDictionary *dic);
     缺点：循环引用造成内存泄露
     
     实现原理：C语言的函数指针 函数指针即函数在内存中的地址，通过这个地址可以达到调用函数的目的。
+    本质：本质上也是一个OC对象，它内部也有个isa指针
+    源码：
+    struct __block_impl {
+    void *isa;
+    int Flags;
+    int Reserved;
+    void *FuncPtr;
+    };
+    
+    struct __main_block_impl_0 {
+    struct __block_impl impl;
+    struct __main_block_desc_0* Desc;
+    // 构造函数（类似于OC的init方法），返回结构体对象
+    __main_block_impl_0(void *fp, struct __main_block_desc_0 *desc, int flags=0) {
+    impl.isa = &_NSConcreteStackBlock;
+    impl.Flags = flags;
+    impl.FuncPtr = fp;
+    Desc = desc;
+    }
+    };
+    
+    // 封装了block执行逻辑的函数
+    static void __main_block_func_0(struct __main_block_impl_0 *__cself) {
+    
+    NSLog((NSString *)&__NSConstantStringImpl__var_folders_2r__m13fp2x2n9dvlr8d68yry500000gn_T_main_c60393_mi_0);
+    }
+    
+    static struct __main_block_desc_0 {
+    size_t reserved;
+    size_t Block_size;
+    } __main_block_desc_0_DATA = { 0, sizeof(struct __main_block_impl_0)};
+    int main(int argc, const char * argv[]) {
+    // @autoreleasepool
+    { __AtAutoreleasePool __autoreleasepool;
+        // 定义block变量
+        void (*block)(void) = &__main_block_impl_0(
+                                                   __main_block_func_0,
+                                                   &__main_block_desc_0_DATA
+                                                   );
+        
+        // 执行block内部的代码
+        block->FuncPtr(block);
+    }
+    return 0;
+}
+
     */
     
     /**
@@ -356,6 +442,14 @@ typedef NSDictionary* (^defParamAndResponse)(NSDictionary *dic);
      __block 本身无法避免循环引用的问题，但是我们可以通过在 block 内部手动把 blockObj 赋值为 nil 的方式来避免循环引用的问题。另外一点就是 __block 修饰的变量在 block 内外都是唯一的，要注意这个特性可能带来的隐患。
      
      */
+    
+    /**
+     注意事项：
+     不能修改自动变量的值是因为：block捕获的是自动变量的const值，名字一样，不能修改
+     
+     可以修改静态变量的值：静态变量属于类的，不是某一个变量。由于block内部不用调用self指针。所以block可以调用。
+     
+     */
 }
 
 /**
@@ -367,11 +461,36 @@ typedef NSDictionary* (^defParamAndResponse)(NSDictionary *dic);
  Block可以定义在方法内部或外部
  只有调用Block的时候，才会执行Block闭包内的代码
  Block的本质是对象，使代码高聚合
+ 
+ Block表达式可截获所使用的自动变量的值。
+ 截获：保存自动变量的瞬间值。
+ 因为是“瞬间值”，所以声明Block之后，即便在Block外修改自动变量的值，也不会对Block内截获的自动变量值产生影响。
+ 
+ 自动变量截获的值为Block声明时刻的瞬间值，保存后就不能改写该值，如需对自动变量进行重新赋值，需要在变量声明前附加__block说明符，这时该变量称为__block变量。
+ 
+ 自动变量值为一个对象情况
+ 当自动变量为一个类的对象，且没有使用__block修饰时，虽然不可以在Block内对该变量进行重新赋值，但可以修改该对象的属性。
+ 如果该对象是个Mutable的对象，例如NSMutableArray，则还可以在Block内对NSMutableArray进行元素的增删：
+ 
+
  */
 
 - (void)defineAndUseBlock{
+    /** 定义及调用
+     return_type表示返回的对象/关键字等(可以是void，并省略)
+     
+     blockName表示block的名称
+     
+     var_type表示参数的类型(可以是void，并省略)
+     
+     varName表示参数名称
+     
+     return_type (^blockName)(var_type) = ^return_type (var_type varName) { // ... };
+     
+     blockName(var);
+     */
     {
-        //1、无参数无返回值 (NoParamAndNoResponseBlock 为Block名，可以根据z使用意义自己定义)
+        //1、无参数无返回值 (NoParamAndNoResponseBlock 为Block名，可以根据使用意义自己定义)
         void(^NoParamAndNoResponseBlock)(void) = ^(void){
             NSLog(@"无参数无返回值");
         };
